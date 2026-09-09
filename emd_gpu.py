@@ -304,9 +304,15 @@ def gpu_eemd_full(x, E=64, tau=0.25, max_sifts=50, max_imf=12,
     Returns (imfs [E,MAXIMF,N], nsift [E], nmode [E])."""
     import cupy as cp
     x = np.asarray(x, dtype=np.float64)
-    single = False
     if x.ndim == 1:
-        x = x[None, :]; single = True
+        # 1-D input is a SINGLE trial. Refuse E>1 with a 1-D signal: the
+        # previous version silently reset E=1 here, which corrupted
+        # concurrency benchmarks (they ran one trial, not E).
+        if E != 1:
+            raise ValueError(
+                "1-D input x is a single trial (E=1). For E>1 pass a 2-D "
+                "(E, N) array of perturbed signals, e.g. x[None,:] + noises.")
+        x = x[None, :]
     E, N = x.shape
     K = K or _pick_K(N)
     kern = get_full_kernel(N, K, max_imf, nthreads)
