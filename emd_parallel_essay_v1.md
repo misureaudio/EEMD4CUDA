@@ -1,4 +1,4 @@
-# Parallel Empirical Mode Decomposition for Long One‑Dimensional Non‑Stationary Signals:
+# Parallel Empirical Mode Decomposition for Long One-Dimensional Non‑Stationary Signals:
 
 ## A Development Account with Its Theoretical Substrate
 
