@@ -205,8 +205,15 @@ def _gpu_decompose(x, E, eps, tau, max_sifts, max_imf, min_extrema, end,
     if max_imf == -1:
         max_imf = 64  # hard cap; the kernel stops when extrema run out
     # batch to fit device memory: per-trial ~= (1 + max_imf)*N + 10*(N/2) doubles
+    # The cupy default pool does NOT return its high-water mark to the
+    # driver on free, so memGetInfo alone undercounts after any large
+    # allocation (silently degrades auto-batching to 1 -> E sequential
+    # single-block kernels). free_all_blocks() releases ONLY cached blocks
+    # (never in-use arrays), after which the driver's free number is the
+    # accurate, conservative signal.
     try:
         import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
         free, _ = cp.cuda.runtime.memGetInfo()
         free = free / (1024**3)
     except Exception:
