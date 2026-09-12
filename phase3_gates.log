@@ -1,0 +1,21 @@
+Phase 3 integration gates   (N=110250, MAXIMF=16)
+baseline: A nmode=9 nsift=26 | B nmode=[np.int32(10), np.int32(10), np.int32(10), np.int32(10), np.int32(10), np.int32(10), np.int32(10), np.int32(10)] nsift=[np.int32(22), np.int32(22), np.int32(23), np.int32(21), np.int32(24), np.int32(23), np.int32(23), np.int32(29)]
+
+--- running new DSBT kernel (config A) ---
+Traceback (most recent call last):
+  File "C:\Users\MATTIA\source\hermes-dir\emd_parallel\test_phase3_gates.py", line 250, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\MATTIA\source\hermes-dir\emd_parallel\test_phase3_gates.py", line 76, in main
+    A_imfs, A_nsift, A_nmode = G.gpu_eemd_full(
+                               ~~~~~~~~~~~~~~~^
+        x2[None, :], E=1, tau=0.25, max_sifts=50, max_imf=MAXIMF)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\MATTIA\source\hermes-dir\emd_parallel\emd_gpu.py", line 515, in gpu_eemd_full
+    Wwin = cp.empty((E, nthreads, 2 * (B + 2 * S)), dtype=np.float64)
+  File "C:\Users\MATTIA\source\hermes-dir\.venv\Lib\site-packages\cupy\_creation\basic.py", line 34, in empty
+    return cupy.ndarray(shape, dtype, order=order)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "cupy/_core/core.pyx", line 176, in cupy._core.core.ndarray.__new__
+  File "cupy/_core/core.pyx", line 237, in cupy._core.core._ndarray_base._init
+TypeError: 'ndarray' object cannot be interpreted as an integer

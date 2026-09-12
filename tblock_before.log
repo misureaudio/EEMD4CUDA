@@ -1,0 +1,3 @@
+C:\Users\MATTIA\source\hermes-dir\.venv\Lib\site-packages\numba\cuda\dispatcher.py:537: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+T_block N=441000 E=1: 4.091 4.089 4.089  median=4.089 s
