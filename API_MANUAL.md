@@ -153,7 +153,7 @@ decompose(x, method='auto', E=64, eps=0.2, tau=0.25, max_sifts=50,
 | `x` | — | 1-D array. Must be 1-D and have length $\ge 8$ (else `ValueError`). |
 | `method` | `'auto'` | `'auto'` / `'cpu'` / `'gpu'`. |
 | `E` | `64` | Ensemble size. $E = 1$ = plain EMD, $E > 1$ = EEMD. |
-| `eps` | `0.2` | Noise amplitude as a fraction of $\mathrm{std}(x)$ (EEMD only). |
+| `eps` | `0.2` | Noise amplitude as a fraction of $\mathrm{std}(x)$ (EEMD only). **Backend asymmetry:** the CPU E=1 path is noise-free, but the GPU path adds $\epsilon\,\mathrm{std}(x)$ noise **even at E=1** — pass `eps=0.0` for a true same-input GPU E=1 (see §11, items 3 and 9). |
 | `tau` | `0.25` | **User stop-criterion** — SD tolerance (Rilling–Flandrin–Gonçalves). Lower `tau` = more siftings = closer to a "true" IMF, slower. |
 | `max_sifts` | `50` | Hard cap on siftings per IMF (safety). |
 | `max_imf` | `-1` | Stop after this many IMFs. **Semantics differ by backend** (see below). |
@@ -658,10 +658,20 @@ c, resid, meta  = R.ceemdan(x, E=100)            # CEEMDAN
 2. **`end` and `min_extrema` are CPU-only.** The GPU kernel is natural-BC only
    with `min_extrema=4` hardcoded; those two `decompose()` args are silently
    ignored when `method='gpu'`.
-3. **GPU vs CPU is chaotic.** Per-IMF agreement is ~1e-8 (A2), per-sift
-   ~1e-13 (A1); a full decomposition amplifies 1-ulp differences by
-   $\times 10^{2}$–$10^{3}$, so exact bit-equality between backends is
-   **not** expected (only same-backend same-seed is bit-identical, A3).
+3. **GPU vs CPU on the SAME input agrees to round-off — the 1e-8 in the
+   A2 gate is a TOLERANCE, not a measured divergence.** Measured
+   (2026-10-18, `docs/mechanism_results.md` §1): A2 (same-input full
+   EMD, 441 k sweep) = 1.4e-13 per-IMF; 27-tone signal E=1 = 1.1e-15;
+   E=64 with the same 64 noised signals: 63/64 trials ≤ 5.1e-15. Rare
+   exception: one trial (1/64 measured) can bifurcate on a sift
+   *decision* boundary (extrema strictness, SD stop) — a 1-ulp
+   difference flipping a decision amplifies to O(1) in that one mode,
+   observed only in the slowest mode. So exact bit-equality between
+   backends is **not** guaranteed for deep ensembles (only
+   same-backend same-seed is bit-identical, A3). Never compare CPU-E1
+   vs GPU-E1 at default `eps`: the inputs differ by 0.2·std of noise
+   (item 9) — that O(1) "divergence" is an input asymmetry, not a
+   backend difference.
 4. **`gpu_eemd_full` trims its output** to `max(nmode)` across the batch —
    different seeds give different depths; compare over the common depth.
 5. **`gpu_eemd_full`'s `seed`/`batch` are vestigial.** Noise + batching happen
@@ -678,3 +688,10 @@ c, resid, meta  = R.ceemdan(x, E=100)            # CEEMDAN
 8. **Don't import the versioned files** (`emd_par_v0/v1/v2`, `emd_gpu_v1..v5`,
    `emd_ref_v0`, `*_A2000`). They are review-trail snapshots; the un-suffixed
    `emd_par.py` / `emd_gpu.py` already ship DSBT + parallel scan.
+9. **`decompose()` E=1 noise asymmetry + RNG streams.** `_cpu_decompose`
+   with E=1 runs plain `emd_1d(x)` (no noise); `_gpu_decompose` always
+   adds `eps·std(x)·noise` — even at E=1. CPU E>1 uses per-trial seeds
+   (_worker_eemd(e, seed, …)); GPU uses one batch stream — so the same
+   `seed` gives **different noise draws** on the two backends for E>1.
+   For same-input comparisons use `eps=0.0` (GPU) or feed `gpu_eemd_full`
+   a pre-noised batch identical to the CPU's per-trial inputs.
