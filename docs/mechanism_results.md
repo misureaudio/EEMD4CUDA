@@ -296,8 +296,9 @@ or computed at E ≥ 256.
 2. **`API_MANUAL.md` §11:** "GPU vs CPU is chaotic. Per-IMF agreement
    is ~1e-8 (A2)" — the 1e-8 is the A2 gate tolerance, not a measured
    divergence; same-input agreement is ≤ 1.4e-13 (measured A2) and
-   1.1e-15 on the 27-tone signal (T1). (Left untouched per the
-   versioning rule — flag for the next manual revision.)
+   1.1e-15 on the 27-tone signal (T1). **Patched 2026-10-18**: §11
+   item 3 rewritten with the measured numbers, item 9 added (E=1 noise
+   asymmetry + RNG streams), §3.1 `eps` row annotated.
 3. **`eemd-par-application` skill:** updated — same-input agreement
    numbers, the E=1 noise-asymmetry pitfall (use `eps=0.0` on the GPU
    path for a true same-input comparison), the DSBT mirror fix, the
