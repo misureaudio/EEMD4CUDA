@@ -84,9 +84,66 @@ def test_analyze_input_validation(wav2):
         analyze(x=np.ones(5), sr=100, method="cpu", E=1)
     assert ei.value.code == "eemd.bad_input"
     with pytest.raises(NotImplementedError):
-        analyze(path=p, wavelet=True)
+        analyze(path=p, entropy=True)  # Tier 4
     with pytest.raises(NotImplementedError):
-        analyze(path=p, tftb=True)
+        analyze(path=p, fractal=True)  # Tier 4
+
+
+def _two_tone_array(n=2048, sr=8000):
+    t = np.arange(n) / sr
+    return (np.sin(2 * np.pi * 100 * t) + np.sin(2 * np.pi * 105 * t)) / 2, sr
+
+
+def test_wavelet_flag():
+    x, sr = _two_tone_array()
+    res = analyze(x=x, sr=sr, method="cpu", E=2, seed=0, wavelet=True)
+    assert res.wavelet is not None
+    freqs, C = res.wavelet
+    assert C.shape == (len(freqs), len(x))
+    assert freqs[0] < freqs[-1]
+    assert res.report["wavelet"]["n_scales"] == len(freqs)
+    d = json.loads(json.dumps(res.to_dict()))
+    assert d["wavelet"]["n_scales"] == len(freqs)
+    # the scalogram must peak near the two tones (interior: CWT edge
+    # artifacts from the zero-padded convolution are expected at the ends)
+    ridge = freqs[np.argmax(np.abs(C), axis=0)]
+    m = len(ridge) // 4
+    assert ridge[m:len(ridge) - m].min() > 50
+    assert ridge[m:len(ridge) - m].max() < 200
+
+
+def test_tftb_flag():
+    x, sr = _two_tone_array()
+    res = analyze(x=x, sr=sr, method="cpu", E=2, seed=0, tftb=True)
+    assert res.tftb_panel is not None
+    p = res.tftb_panel
+    for key in ("spectrogram", "spwvd", "reassigned",
+                "t_stft", "f_stft", "t_spwvd", "f_spwvd", "t_reass", "f_reass"):
+        assert key in p, key
+    assert np.isfinite(p["spectrogram"]).all()
+    assert np.isfinite(p["spwvd"]).all()
+    assert np.isfinite(p["reassigned"]).all()
+    # SPWVD is a Cohen-class TFR: it must contain negative values here
+    assert p["spwvd"].min() < 0
+    assert res.report["tftb"]["gate"]["stft_corr"] > 0.99
+    assert any("tftb" in c for c in res.caveats)
+    d = json.loads(json.dumps(res.to_dict()))
+    assert d["tftb"]["version"]
+
+
+def test_tftb_gate_failure(monkeypatch):
+    """A failing gate G1 must surface as TFTBError (CLI maps to exit 5)."""
+    import audio_eemd.api as api
+    from audio_eemd.spectra import TFTBError
+
+    def _fail():
+        raise TFTBError("simulated gate failure", code="tftb.gate_failed")
+
+    monkeypatch.setattr(api, "check_tftb_gate", _fail)
+    x, sr = _two_tone_array()
+    with pytest.raises(TFTBError) as ei:
+        analyze(x=x, sr=sr, method="cpu", E=2, seed=0, tftb=True)
+    assert ei.value.code == "tftb.gate_failed"
 
 
 def test_artifacts_written(res2):

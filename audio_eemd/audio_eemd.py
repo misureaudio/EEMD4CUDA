@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """audio_eemd CLI — thin adapter over the audio_eemd API.
 
-Tier 2: metadata + audio statistics + EEMD decomposition + STFT/Hilbert
-time-frequency layer; writes report.json, metadata.csv, imfs.npz, stft.npz,
-hilbert.npz and the core figures fig_01..06.
+Tier 3: metadata + audio statistics + EEMD decomposition + STFT/Hilbert
+time-frequency layer + (flag-gated) Morlet CWT scalogram (fig 07) and
+tftb panel (fig 08, gate G1); writes report.json, metadata.csv, imfs.npz,
+stft.npz, hilbert.npz and figures fig_01..06 (+07/08 when flagged).
 Flags: --method auto|cpu|gpu, --E, --eps, --tau, --max-imf, --max-sifts,
-       --seed, --batch, --nperseg, --noverlap, --csv (per-IMF CSV dumps).
+       --seed, --batch, --nperseg, --noverlap, --wavelet, --tftb,
+       --csv (per-IMF CSV dumps).
 
-Exit codes: 0 ok · 2 bad usage/segment · 3 file unreadable · 4 EEMD error.
+Exit codes: 0 ok · 2 bad usage/segment · 3 file unreadable · 4 EEMD error
+            · 5 tftb gate G1 failed (only with --tftb).
 """
 from __future__ import annotations
 
@@ -18,7 +21,8 @@ from pathlib import Path
 # Bootstrap: make the package importable regardless of cwd (plan §4.2 rule 4).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from audio_eemd import AudioError, EEMDError, SegmentError, analyze  # noqa: E402
+from audio_eemd import (AudioError, EEMDError, SegmentError, TFTBError,  # noqa: E402
+                        analyze)
 
 
 class _BadUsage(Exception):
@@ -76,6 +80,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="STFT window length in samples (default 4096)")
     ap.add_argument("--noverlap", type=int, default=None,
                     help="STFT overlap in samples (default nperseg//2)")
+    ap.add_argument("--wavelet", action="store_true",
+                    help="also compute the Morlet CWT scalogram "
+                         "(fig_07_wavelet)")
+    ap.add_argument("--tftb", action="store_true",
+                    help="also compute the tftb panel (fig_08_tftb); "
+                         "requires gate G1 to pass (exit 5 if not)")
     ap.add_argument("--csv", action="store_true",
                     help="also dump per-IMF CSVs (imf_k.csv, residual.csv)")
     ap.add_argument("--out", type=Path, default=None,
@@ -96,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
                       tau=args.tau, max_imf=args.max_imf,
                       max_sifts=args.max_sifts, seed=args.seed,
                       batch=args.batch, nperseg=args.nperseg,
-                      noverlap=args.noverlap, csv=args.csv,
+                      noverlap=args.noverlap, wavelet=args.wavelet,
+                      tftb=args.tftb, csv=args.csv,
                       outdir=None, render=False)
     except AudioError as e:
         print(f"error[{e.code}]: {e}", file=sys.stderr)
@@ -107,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     except EEMDError as e:
         print(f"error[{e.code}]: {e}", file=sys.stderr)
         return 4
+    except TFTBError as e:
+        print(f"error[{e.code}]: {e}", file=sys.stderr)
+        return 5
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

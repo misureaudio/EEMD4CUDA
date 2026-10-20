@@ -37,6 +37,13 @@ CAVEAT_HILBERT = (
     "ensemble averaging in EEMD is for. IF statistics use the positive part "
     "only."
 )
+CAVEAT_TFTB = (
+    "tftb is a dev build (0.3.0.dev0): outputs pass gate G1 but are "
+    "reference-grade, not primary results. The tftb time axis is subsampled "
+    "(time_hop) because its per-column cores are pure Python; the SPWVD "
+    "panel is a Cohen-class TFR with negative values (clipped in the "
+    "figure)."
+)
 
 
 def _dominant_freq(x: np.ndarray, sr: int) -> float | None:
@@ -201,6 +208,31 @@ def write_hilbert_npz(outdir: Path, hilb: list) -> Path:
     return p
 
 
+def write_wavelet_npz(outdir: Path, wavelet: tuple) -> Path:
+    """wavelet.npz: freqs [n_scales], CFS [n_scales, N] (complex, Tier 3)."""
+    freqs, C = wavelet
+    p = outdir / "wavelet.npz"
+    np.savez_compressed(p, freqs=freqs, CFS=C)
+    return p
+
+
+def write_tftb_npz(outdir: Path, panel: dict) -> Path:
+    """tftb.npz: spectrogram / spwvd / reassigned [T, F] + axes (Tier 3)."""
+    p = outdir / "tftb.npz"
+    np.savez_compressed(
+        p,
+        spectrogram=panel["spectrogram"], spwvd=panel["spwvd"],
+        reassigned=panel["reassigned"],
+        t_stft=panel["t_stft"], f_stft=panel["f_stft"],
+        t_spwvd=panel["t_spwvd"], f_spwvd=panel["f_spwvd"],
+        t_reass=panel["t_reass"], f_reass=panel["f_reass"],
+        version=np.asarray(panel["version"]),
+        n_fbins=np.int64(panel["n_fbins"]),
+        time_hop=np.int64(panel["time_hop"]),
+    )
+    return p
+
+
 def write_mode_csvs(outdir: Path, t: np.ndarray, imfs: np.ndarray,
                     residual: np.ndarray) -> list[Path]:
     """Per-IMF CSV dumps (time_s, value) + residual.csv (Tier 4 --csv)."""
@@ -218,10 +250,11 @@ def write_mode_csvs(outdir: Path, t: np.ndarray, imfs: np.ndarray,
 
 
 def write_artifacts(res, outdir: str | Path) -> list[Path]:
-    """Write all Tier-1/2 artifacts for an AnalysisResult (duck-typed).
+    """Write all Tier-1/2/3 artifacts for an AnalysisResult (duck-typed).
 
-    Files: report.json, metadata.csv, imfs.npz, stft.npz, hilbert.npz, and
-    (if parameters['csv']) per-IMF CSVs. Figures are written by the caller
+    Files: report.json, metadata.csv, imfs.npz, stft.npz, hilbert.npz,
+    wavelet.npz / tftb.npz (when computed) and (if parameters['csv'])
+    per-IMF CSVs. Figures are written by the caller
     (plots.render_figures).
     """
     outdir = Path(outdir)
@@ -233,6 +266,10 @@ def write_artifacts(res, outdir: str | Path) -> list[Path]:
         files.append(write_stft_npz(outdir, res.stft))
     if res.hilbert is not None:
         files.append(write_hilbert_npz(outdir, res.hilbert))
+    if getattr(res, "wavelet", None) is not None:
+        files.append(write_wavelet_npz(outdir, res.wavelet))
+    if getattr(res, "tftb_panel", None) is not None:
+        files.append(write_tftb_npz(outdir, res.tftb_panel))
     if res.parameters.get("csv"):
         files += write_mode_csvs(outdir, res.t, res.imfs, res.residual)
     return files

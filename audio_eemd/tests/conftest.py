@@ -1,8 +1,13 @@
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+# Deterministic test backend: tests render to files, no GUI needed. Set before
+# any test imports matplotlib (env var is read at first pyplot import).
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))

@@ -1,8 +1,13 @@
 """Time-frequency building blocks (plan Task 3).
 
 Tier 2 wires `stft_block` + `hilbert_if`/`if_stats` into analyze().
-`morlet_cwt` (Tier 3) and `sample_entropy`/`higuchi_dim` (Tier 4) live here
-but are not wired into analyze() until their tier.
+Tier 3: `morlet_cwt` + the gated tftb suite (`check_tftb_gate`,
+`tftb_panel`, `tftb_holder`). `sample_entropy`/`higuchi_dim` (Tier 4)
+live here but are not wired into analyze() until their tier.
+
+tftb (0.3.0.dev0, dev build) is imported lazily inside functions and is
+only ever trusted after gate G1 (`check_tftb_gate`) passes — it is never
+a hard dependency of the package.
 """
 from __future__ import annotations
 
@@ -57,8 +62,9 @@ def morlet_cwt(x: np.ndarray, sr: int, f_lo: float = 100.0, n_scales: int = 40,
                f_c: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
     """Manual FFT-based Morlet CWT (scipy.signal.cwt is absent in scipy 1.18).
 
-    Kernel ψ_a(t) = π^(-1/4)·e^{i 2 f_c t/a}·e^{-t²/(2a²)} with a = f_c·sr/f;
-    scales log-spaced from f_lo to ~Nyquist; per scale
+    Kernel ψ_a(n) = π^(-1/4)·e^{i 2π f_c n/a}·e^{-n²/(2a²)} with a = f_c·sr/f
+    (sample units; the 2π makes the spectral peak land at f — without it the
+    peak is at f/π); scales log-spaced from f_lo to ~Nyquist; per scale
     C_j = ifft(fft(x, 2N)·fft(ψ_j, 2N))[:N] (zero-padded = linear conv;
     full fft because the Morlet kernel is complex).
     Returns (freqs [n_scales], C [n_scales, N] complex).
@@ -72,10 +78,45 @@ def morlet_cwt(x: np.ndarray, sr: int, f_lo: float = 100.0, n_scales: int = 40,
         a = f_c * sr / f
         half = int(np.ceil(5.0 * a / np.sqrt(2.0)))  # 5 sigmas of the envelope
         tn = np.arange(-half, half + 1)
-        psi = (np.pi ** (-0.25) * np.exp(1j * 2.0 * f_c * tn / a)
+        psi = (np.pi ** (-0.25) * np.exp(1j * 2.0 * np.pi * f_c * tn / a)
                * np.exp(-(tn ** 2) / (2.0 * a ** 2)))
         C[j] = np.fft.ifft(X * np.fft.fft(psi, 2 * N), 2 * N)[:N]
     return freqs, C
+
+
+_MORLET_GAIN_CACHE: dict = {}
+
+
+def morlet_cwt_gain(sr: int, freqs: np.ndarray,
+                    f_c: float = 1.0) -> np.ndarray:
+    """Per-scale CWT gain: |C| produced by a full-scale (amplitude 1.0)
+    sine at the scale's own frequency.
+
+    Measured through the exact kernel code path (same truncation and FFT
+    as morlet_cwt), because the analytic Gaussian-sum approximation breaks
+    for a < ~3 samples (the Morlet double-frequency term then adds up to a
+    factor of 2). With the gains, |C|/gain = sine amplitude, so the
+    scalogram can be read in dBFS (0 dBFS = full-scale sine).
+    Cached per (sr, freqs, f_c).
+    """
+    key = (sr, tuple(np.asarray(freqs).tolist()), f_c)
+    cached = _MORLET_GAIN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    gains = np.empty(len(freqs))
+    for j, f in enumerate(freqs):
+        a = f_c * sr / f
+        half = int(np.ceil(5.0 * a / np.sqrt(2.0)))
+        tn = np.arange(-half, half + 1)
+        psi = (np.pi ** (-0.25) * np.exp(1j * 2.0 * np.pi * f_c * tn / a)
+               * np.exp(-(tn ** 2) / (2.0 * a ** 2)))
+        L = 2 * (2 * half + 1) + 8  # interior peak well inside the signal
+        x = np.sin(2.0 * np.pi * f * np.arange(L) / sr)
+        Cj = np.fft.ifft(np.fft.fft(x, 2 * L) * np.fft.fft(psi, 2 * L),
+                         2 * L)[:L]
+        gains[j] = np.abs(Cj[L // 3:2 * L // 3]).max()
+    _MORLET_GAIN_CACHE[key] = gains
+    return gains
 
 
 def _decimate(x: np.ndarray, max_pts: int = 4096) -> np.ndarray:
@@ -152,3 +193,144 @@ def higuchi_dim(x: np.ndarray, k_max: int = 10) -> float:
     # D is the slope of log L vs log(1/k) = -log k
     return float(-np.polyfit(np.log(np.array(ks, dtype=float)),
                              np.log(np.array(Ls, dtype=float)), 1)[0])
+
+
+# ------------------------------------------------ Tier 3: tftb (gated) --
+
+class TFTBError(Exception):
+    """tftb gate failed or import failed (Tier 3, plan Task 9)."""
+
+    def __init__(self, message: str, code: str = "tftb.gate_failed"):
+        super().__init__(message)
+        self.code = code
+
+
+_TFTB_GATE: dict | None = None
+
+
+def check_tftb_gate() -> dict:
+    """Gate G1 (plan Task 9): validate the dev0 tftb build before any tftb
+    output is trusted. Runs once per process (cached result).
+
+    Checks on a deterministic 100/105 Hz two-tone reference (4096 samples
+    @ 8 kHz), tftb window passed to BOTH sides:
+      1. tftb `spectrogram` vs scipy STFT — amplitude correlation > 0.99 on
+         the common (resampled) frequency grid. Note: tftb returns |DFT|²,
+         so the comparison is |Z| vs sqrt(|S|);
+      2. `smoothed_pseudo_wigner_ville` runs and returns a finite matrix.
+    Raises TFTBError (stable code) on any failure.
+    """
+    global _TFTB_GATE
+    if _TFTB_GATE is not None:
+        return _TFTB_GATE
+    try:
+        from importlib.metadata import version as _pkg_version
+        from tftb.processing.reassigned import (
+            smoothed_pseudo_wigner_ville,
+            spectrogram,
+        )
+        from tftb.processing.utils import tftb_window
+    except Exception as e:
+        raise TFTBError(f"tftb import failed: {e!r}",
+                        code="tftb.import_failed") from e
+    try:
+        ver = _pkg_version("tftb")
+    except Exception:
+        ver = "unknown"
+
+    sr = 8000
+    n = 4096
+    t = np.arange(n) / sr
+    xref = (np.sin(2 * np.pi * 100 * t) + np.sin(2 * np.pi * 105 * t)) / 2
+    win = tftb_window(255, "Hanning")
+    f, tt, Z = ss.stft(xref, fs=sr, window=win, nperseg=255, noverlap=127,
+                       boundary="zeros", padded=False)
+    # tftb on the same time grid (scipy's frame centers, in sample indices)
+    ts = (tt * sr).round().astype(int)
+    ts = ts[(ts >= 0) & (ts < n)]
+    St, _, _ = spectrogram(xref, time_samples=ts, n_fbins=256, window=win)
+    # tftb's spectrogram is |DFT|² (energy) — compare amplitudes
+    Spos = np.sqrt(np.abs(St[:256 // 2 + 1, :]))
+    ft = np.arange(256 // 2 + 1) * sr / 256
+    a = np.abs(Z[:, :len(ts)])
+    if len(f) == len(ft):
+        b = Spos
+    else:  # resample tftb's frequency grid onto scipy's → (F, T)
+        b = np.array([np.interp(f, ft, Spos[:, j])
+                      for j in range(Spos.shape[1])]).T
+    corr = float(np.corrcoef(a.ravel(), b.ravel())[0, 1])
+    if not (corr > 0.99):
+        raise TFTBError(
+            f"tftb gate G1 failed: tftb-vs-scipy STFT amplitude correlation "
+            f"{corr:.4f} <= 0.99 (dev0 build mismatch)")
+
+    T = smoothed_pseudo_wigner_ville(xref, timestamps=ts, n_fbins=256)[0]
+    if not np.isfinite(T).all() or T.shape != (256, len(ts)):
+        raise TFTBError(
+            f"tftb gate G1 failed: SPWVD output not finite / wrong shape "
+            f"{T.shape}")
+
+    _TFTB_GATE = {"version": ver, "stft_corr": round(corr, 5),
+                  "spwvd_shape": list(T.shape)}
+    return _TFTB_GATE
+
+
+def tftb_panel(x: np.ndarray, sr: int, n_fbins: int = 256,
+               time_hop: int = 64) -> dict:
+    """tftb reference TFR panel (Tier 3, `--tftb`). Gate G1 must pass.
+
+    tftb's per-column cores are pure Python, so the time axis is
+    subsampled by `time_hop` (noted in the report); at 44.1 kHz the
+    defaults cost ~2 s per second of audio. Positive frequencies only
+    (0 .. sr/2, `n_fbins` DFT bins). Arrays are stored [T, F] —
+    `fig_08_tftb` transposes for pcolormesh.
+
+    Returns a dict with keys: version, n_fbins, time_hop,
+    spectrogram / spwvd / reassigned (+ t_*/f_* axes per panel).
+    `spwvd` is a Cohen-class TFR and contains negative values
+    (fig_08 clips them and says so).
+    """
+    gate = check_tftb_gate()
+    from tftb.processing.reassigned import (
+        reassigned_gabor,
+        smoothed_pseudo_wigner_ville,
+        spectrogram,
+    )
+    n = len(x)
+    ts = np.arange(0, n, time_hop)
+    S, _, _ = spectrogram(x, time_samples=ts, n_fbins=n_fbins)
+    T, _, _ = smoothed_pseudo_wigner_ville(x, timestamps=ts, n_fbins=n_fbins)
+    R, _, _ = reassigned_gabor(x, time_samples=ts, n_fbins=n_fbins)
+    f = np.arange(n_fbins // 2 + 1) * sr / n_fbins
+    t = ts.astype(float) / sr
+    nf = n_fbins // 2 + 1
+    return {
+        "version": gate["version"],
+        "n_fbins": n_fbins,
+        "time_hop": time_hop,
+        "spectrogram": np.abs(S[:nf, :]).T,
+        "spwvd": np.real(T[:nf, :]).T,
+        "reassigned": np.real(R[:nf, :]).T,
+        "t_stft": t, "f_stft": f,
+        "t_spwvd": t, "f_spwvd": f,
+        "t_reass": t, "f_reass": f,
+    }
+
+
+def tftb_holder(x: np.ndarray, sr: int, n_fbins: int = 128,
+                time_hop: int = 64) -> float | None:
+    """Global Hölder exponent via `tftb.processing.analysis.holder` on the
+    tftb spectrogram — the per-IMF fractal estimate used when `--tftb` is
+    active (plan Tier 3/4). NaN → None. DC bin excluded (log 0).
+    """
+    check_tftb_gate()
+    from tftb.processing.analysis import holder
+    from tftb.processing.reassigned import spectrogram
+    n = len(x)
+    ts = np.arange(0, n, time_hop)
+    S, _, _ = spectrogram(x, time_samples=ts, n_fbins=n_fbins)
+    f = np.arange(n_fbins // 2 + 1) * sr / n_fbins
+    Sp = np.abs(S[1:n_fbins // 2 + 1, :])  # drop DC
+    h = holder(Sp, f[1:])
+    h = float(h)
+    return h if np.isfinite(h) else None

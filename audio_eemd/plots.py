@@ -31,6 +31,7 @@ COLORMAP_SPECTRO = "magma"
 COLORMAP_SCALOG = "viridis"
 MAX_LINE_PTS = 20_000
 _LOG_EPS = 1e-12
+_DBFS_FLOOR = -100.0  # display floor for dBFS scales (below: black)
 
 
 def _mpl():
@@ -132,31 +133,52 @@ def fig_02_imfs(ctx: FigCtx):
     return fig
 
 
+def _zxx_dBFS(Zxx: np.ndarray) -> np.ndarray:
+    """STFT bins -> dBFS, where 0 dBFS = full-scale sine (amplitude 1.0).
+
+    scipy stft (scaling='spectrum') normalizes by sum(window), so a
+    bin-centered sine of amplitude A reads |Z| = A/2 — hence A = 2|Z|
+    (window-independent). dBFS = 20·log10(A): a full-scale tone sits at
+    0 dBFS, giving an absolute, cross-panel comparable level reference.
+    """
+    A = 2.0 * np.abs(Zxx)
+    return 20.0 * np.log10(A + 1e-12)
+
+
 def fig_03_stft_original(ctx: FigCtx):
-    """Log-magnitude STFT of the segment."""
+    """Log-magnitude STFT of the segment (dBFS, log frequency)."""
     plt = _mpl()
     f, t, Zxx, _ = ctx.stft
-    mag = 20 * np.log10(np.abs(Zxx) + _LOG_EPS)
+    dB = _zxx_dBFS(Zxx)[1:]          # drop the DC bin (log axis)
+    f1 = f[1:]
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    mesh = ax.pcolormesh(t, f, mag, shading="auto", cmap=COLORMAP_SPECTRO,
-                         vmin=mag.min(), vmax=np.percentile(mag, 99))
+    mesh = ax.pcolormesh(t, f1, dB, shading="auto", cmap=COLORMAP_SPECTRO,
+                         vmin=max(dB.min(), _DBFS_FLOOR),
+                         vmax=max(dB.max(), 0.0))
+    ax.set_yscale("log")
     ax.set_xlabel("time [s]")
-    ax.set_ylabel("frequency [Hz]")
-    ax.set_title(f"fig 03 — STFT of segment (log |Z|)  |  {ctx.title}")
-    fig.colorbar(mesh, ax=ax, label="dB")
+    ax.set_ylabel("frequency [Hz] (log)")
+    ax.set_title(f"fig 03 — STFT of segment (dBFS)  |  {ctx.title}")
+    fig.colorbar(mesh, ax=ax, label="dBFS")
     fig.tight_layout()
     return fig
 
 
 def fig_04_stft_imfs(ctx: FigCtx):
-    """Per-IMF STFT grid, shared color scale (99th pct of |Z| across modes)."""
+    """Per-IMF STFT grid, shared dBFS scale, log frequency.
+
+    0 dBFS = full-scale sine (amplitude 1.0); the shared scale keeps
+    relative levels comparable across modes (significant vs faint).
+    """
     plt = _mpl()
     k = ctx.imfs.shape[0]
     f, t, _, Zim = ctx.stft
     if k == 0:
         return _empty_fig(plt, "no IMFs (degenerate input)")
-    mags = [20 * np.log10(np.abs(Zim[i]) + _LOG_EPS) for i in range(k)]
-    vmax = float(np.percentile(np.concatenate([m.ravel() for m in mags]), 99))
+    f1 = f[1:]
+    dBs = [_zxx_dBFS(Zim[i])[1:] for i in range(k)]
+    vmin = max(float(min(dB.min() for dB in dBs)), _DBFS_FLOOR)
+    vmax = max(float(max(dB.max() for dB in dBs)), 0.0)
     nrows = max(k, 4)
     fig, axes = plt.subplots(nrows, 1, figsize=(11, 1.6 * nrows + 1),
                              squeeze=False)
@@ -164,21 +186,27 @@ def fig_04_stft_imfs(ctx: FigCtx):
     for i in range(nrows):
         ax = axes[i, 0]
         if i < k:
-            m = ax.pcolormesh(t, f, mags[i], shading="auto",
-                              cmap=COLORMAP_SPECTRO, vmin=mags[0].min(),
-                              vmax=vmax)
+            m = ax.pcolormesh(t, f1, dBs[i], shading="auto",
+                              cmap=COLORMAP_SPECTRO, vmin=vmin, vmax=vmax)
             if i == 0:
                 mesh0 = m
+            ax.set_yscale("log")
             ax.set_ylabel(f"IMF {i}", rotation=0, labelpad=14, fontsize=8)
         else:
             ax.axis("off")
         if i == nrows - 1:
             ax.set_xlabel("time [s]")
-    axes[0, 0].set_title(f"fig 04 — per-IMF STFT, shared scale  |  {ctx.title}")
-    fig.colorbar(mesh0, ax=axes[:k, 0].ravel().tolist(), label="dB (shared)")
-    # the multi-axis colorbar is not tight_layout-compatible
+    axes[0, 0].set_ylabel("IMF 0 / frequency [Hz] (log)", rotation=0,
+                          labelpad=14, fontsize=8)
+    axes[0, 0].set_title(f"fig 04 — per-IMF STFT, shared dBFS  |  {ctx.title}")
+    # Explicit colorbar axes: fig.colorbar(ax=<list>) places the bar from the
+    # axes' bounding box AT CALL TIME, so a later subplots_adjust(right=...)
+    # would stretch the panels over the bar (colorbar then drawn on top of
+    # the data). A fixed cax is immune to layout adjustments.
     fig.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.05,
                         hspace=0.05)
+    cax = fig.add_axes([0.92, 0.05, 0.015, 0.88])
+    fig.colorbar(mesh0, cax=cax, label="dBFS (shared)")
     return fig
 
 
@@ -238,25 +266,36 @@ def fig_06_energy(ctx: FigCtx):
 
 
 def fig_07_wavelet(ctx: FigCtx):
-    """(Tier 3, flag) Morlet scalogram of the segment."""
+    """(Tier 3, flag) Morlet scalogram of the segment (dBFS, log frequency).
+
+    Normalized per scale by morlet_cwt_gain so a full-scale sine reads
+    0 dBFS at its own frequency — same reference as fig 03/04.
+    """
     plt = _mpl()
+    from .spectra import morlet_cwt_gain
     freqs, C = ctx.wavelet
-    mag = 20 * np.log10(np.abs(C) + _LOG_EPS)
+    gains = morlet_cwt_gain(ctx.sr, freqs)
+    dB = 20.0 * np.log10(np.abs(C) / gains[:, None] + 1e-12)
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    mesh = ax.pcolormesh(ctx.t, freqs, mag, shading="auto",
-                         cmap=COLORMAP_SCALOG, vmin=mag.min(),
-                         vmax=np.percentile(mag, 99))
+    mesh = ax.pcolormesh(ctx.t, freqs, dB, shading="auto",
+                         cmap=COLORMAP_SCALOG,
+                         vmin=max(dB.min(), _DBFS_FLOOR),
+                         vmax=max(dB.max(), 0.0))
     ax.set_yscale("log")
     ax.set_xlabel("time [s]")
-    ax.set_ylabel("frequency [Hz]")
-    ax.set_title(f"fig 07 — Morlet CWT scalogram  |  {ctx.title}")
-    fig.colorbar(mesh, ax=ax, label="dB")
+    ax.set_ylabel("frequency [Hz] (log)")
+    ax.set_title(f"fig 07 — Morlet CWT scalogram (dBFS)  |  {ctx.title}")
+    fig.colorbar(mesh, ax=ax, label="dBFS")
     fig.tight_layout()
     return fig
 
 
 def fig_08_tftb(ctx: FigCtx):
-    """(Tier 3, flag) tftb panels: spectrogram / SPWVD / reassignment."""
+    """(Tier 3, flag) tftb panels: spectrogram / SPWVD / reassignment.
+
+    Shared color scale across panels (the TFRs are comparable in magnitude
+    after clipping); explicit cax (see fig_04 for why not ax=<list>).
+    """
     plt = _mpl()
     panels = [(name, arr, t, f) for name, arr, t, f in (
         ("tftb spectrogram", ctx.tftb.get("spectrogram"),
@@ -266,17 +305,34 @@ def fig_08_tftb(ctx: FigCtx):
         ("reassigned gabor", ctx.tftb.get("reassigned"),
          ctx.tftb.get("t_reass"), ctx.tftb.get("f_reass")),
     ) if arr is not None]
+    if not panels:
+        return _empty_fig(plt, "no tftb panels")
+    clipped = [np.clip(arr, 0, None) for _, arr, _, _ in panels]
+    vmax = float(max(np.percentile(a, 99) for a in clipped))
+    # Display band: from 0 up to the frequency containing 99 % of the
+    # spectrogram energy (clamped to [1 kHz, Nyquist]) — keeps low-band
+    # content readable instead of squashed under a mostly-black axis.
+    f_spec = panels[0][3]
+    e = np.sum(clipped[0], axis=0)  # per-frequency energy, spectrogram panel
+    fmax = float(f_spec[np.searchsorted(np.cumsum(e) / max(e.sum(), 1e-300),
+                                        0.99)])
+    fmax = min(max(fmax * 1.25, 1000.0), f_spec[-1])
+    keep = f_spec <= fmax
     fig, axes = plt.subplots(len(panels), 1,
                              figsize=(11, 3.5 * len(panels) + 1),
                              squeeze=False)
-    for (name, arr, tt, ff), ax in zip(panels, axes[:, 0]):
-        a = np.clip(arr, 0, None)
-        ax.pcolormesh(tt, ff, a.T, shading="auto", cmap=COLORMAP_SPECTRO,
-                      vmax=np.percentile(a, 99))
-        ax.set_ylabel(name, fontsize=8)
+    mesh0 = None
+    for (name, arr, tt, ff), a, ax in zip(panels, clipped, axes[:, 0]):
+        m = ax.pcolormesh(tt, ff[keep], a.T[keep, :], shading="auto",
+                          cmap=COLORMAP_SPECTRO, vmin=0.0, vmax=vmax)
+        if mesh0 is None:
+            mesh0 = m
+        ax.set_title(name, fontsize=9, loc="left")
+        ax.set_ylabel("frequency [Hz]")
         ax.set_xlabel("time [s]")
-    axes[0, 0].set_title(f"fig 08 — tftb panels  |  {ctx.title}")
-    fig.tight_layout()
+    fig.suptitle(f"fig 08 — tftb panels (shared scale)  |  {ctx.title}")
+    cax = fig.add_axes([0.92, 0.10, 0.015, 0.84])
+    fig.colorbar(mesh0, cax=cax, label="TFR value (shared)")
     return fig
 
 

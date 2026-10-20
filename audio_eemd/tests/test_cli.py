@@ -69,3 +69,21 @@ def test_cli_smoke_1s(flac_path, tmp_path):
     assert "segment" in r.stdout
     assert "n_modes" in r.stdout
     assert "IF Hz" in r.stdout
+
+
+def test_cli_wavelet_tftb(flac_path, tmp_path):
+    """--wavelet and --tftb add fig 07/08 and their report blocks (Tier 3)."""
+    r = run_cli(flac_path, "--start", "10", "--duration", "1",
+                "--method", "cpu", "--E", "2", "--seed", "0",
+                "--wavelet", "--tftb",
+                "--out", tmp_path / "t3")
+    assert r.returncode == 0, r.stderr
+    out = tmp_path / "t3"
+    assert (out / "fig_07_wavelet.png").exists()
+    assert (out / "fig_08_tftb.png").exists()
+    rep = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert rep["parameters"]["wavelet"] is True
+    assert rep["parameters"]["tftb"] is True
+    assert rep["wavelet"]["n_scales"] >= 10
+    assert rep["tftb"]["gate"]["stft_corr"] > 0.99
+    assert set(rep["tftb"]["panels"]) == {"spectrogram", "spwvd", "reassigned"}

@@ -3,15 +3,17 @@
 Tier 0: metadata + audio statistics (audio_io).
 Tier 1: EEMD core (eemd_stage) + public API (analyze / AnalysisResult)
   + per-mode table + imfs.npz artifacts (report).
-Tier 2 (current): STFT + per-IMF Hilbert IF, Morlet CWT, 6 core figures
+Tier 2: STFT + per-IMF Hilbert IF, Morlet CWT, 6 core figures
   (plots), full artifact bundle (report.write_artifacts).
+Tier 3 (current): flag-gated `--wavelet` (Morlet scalogram, fig 07) and
+  `--tftb` (gated tftb panel, fig 08; gate G1 → TFTBError / exit 5).
 Later tiers (per .hermes/plans/2026-10-19_093212-audio-eemd-analysis.md):
-  Tier 3 — tftb panel (gated), Tier 4 — CSV / entropy / fractal.
+  Tier 4 — CSV extras / entropy / fractal.
 
 `import audio_eemd` stays light: no matplotlib, no cupy, no tftb at
 import time (all imported lazily inside functions).
 """
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .audio_io import (
     AudioError,

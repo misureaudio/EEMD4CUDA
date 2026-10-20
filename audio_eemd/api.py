@@ -1,4 +1,4 @@
-"""Public API surface (plan §4.1) — Tier 1: EEMD core.
+"""Public API surface (plan §4.1).
 
 This is the module an MCP server or a Jupyter notebook binds to:
 
@@ -10,12 +10,13 @@ This is the module an MCP server or a Jupyter notebook binds to:
 Contract (plan §4.2): JSON-friendly arguments, JSON-friendly to_dict(),
 typed exceptions with stable machine-readable codes, no implicit state
 (explicit seed, explicit outdir, idempotent artifact writes), no cwd
-dependence, lazy heavy imports (no matplotlib at import time).
+dependence, lazy heavy imports (no matplotlib/tftb at import time).
 
-Tier 1 scope: load → segment → EEMD → per-mode table → artifacts.
-stft/hilbert/wavelet/tftb/entropy/fractal fields exist on AnalysisResult
-but are None until their tier lands; passing the corresponding flags to
-analyze() raises NotImplementedError until then.
+Tier 1: load → segment → EEMD → per-mode table → artifacts.
+Tier 2: STFT + per-IMF Hilbert IF (always, when the segment is long enough).
+Tier 3: `wavelet=True` → Morlet CWT scalogram; `tftb=True` → gated tftb
+    panel (TFTBError with exit-code-5 semantics if gate G1 fails).
+Tier 4: entropy/fractal — still NotImplementedError.
 """
 from __future__ import annotations
 
@@ -29,22 +30,15 @@ from .audio_io import (AudioError, AudioFile, SegmentError, audio_stats,
                        bit_depth, load_audio, resolve_segment, select_segment)
 from .eemd_stage import EEMDError, run_eemd
 from .report import (CAVEAT_GPU, CAVEAT_HILBERT, CAVEAT_NONORTHOGONAL,
-                     CAVEAT_SEED, build_report, mode_table)
-from .spectra import hilbert_if, if_stats, stft_block
+                     CAVEAT_SEED, CAVEAT_TFTB, build_report, mode_table)
+from .spectra import (TFTBError, check_tftb_gate, hilbert_if, if_stats,
+                      morlet_cwt, stft_block, tftb_panel)
 
 __all__ = [
     "analyze", "AnalysisResult", "TFTBError",
     "AudioError", "SegmentError", "EEMDError",
     "load_audio", "select_segment", "get_metadata", "audio_stats",
 ]
-
-
-class TFTBError(Exception):
-    """tftb module gate failed (Tier 3)."""
-
-    def __init__(self, message: str, code: str = "tftb.gate_failed"):
-        super().__init__(message)
-        self.code = code
 
 
 def _arr_summary(a: np.ndarray) -> dict:
@@ -119,6 +113,8 @@ class AnalysisResult:
                 "imfs": _arr_summary(self.imfs),
                 "residual": _arr_summary(self.residual),
             },
+            "wavelet": self.report.get("wavelet"),
+            "tftb": self.report.get("tftb"),
             "timings": self.timings,
             "caveats": self.caveats,
             "outdir": str(self.outdir) if self.outdir is not None else None,
@@ -156,10 +152,6 @@ def analyze(path: str | Path | None = None,
     """
     if (path is None) == (x is None):
         raise ValueError("analyze: provide exactly one of path= or x= (with sr=)")
-    if wavelet:
-        raise NotImplementedError("wavelet (Morlet CWT) is a Tier-3 feature")
-    if tftb:
-        raise NotImplementedError("tftb panel is a Tier-3 feature (gate pending)")
     if entropy or fractal:
         raise NotImplementedError("entropy/fractal are Tier-4 features")
 
@@ -248,6 +240,25 @@ def analyze(path: str | Path | None = None,
     else:
         caveats.append("segment too short for STFT/Hilbert (need ≥ 16 samples); "
                        "stft/hilbert outputs are null")
+    # ---- Tier 3: wavelet (Morlet CWT) + tftb panel (gated) --------------
+    wlet = None
+    if wavelet and len(xseg) >= 64:
+        t0 = time.perf_counter()
+        wlet = morlet_cwt(xseg, a.sr)
+        timings["wavelet_s"] = round(time.perf_counter() - t0, 3)
+    elif wavelet:
+        caveats.append("segment too short for Morlet CWT (< 64 samples); "
+                       "wavelet output is null")
+
+    tpanel = None
+    if tftb and len(xseg) >= 256:
+        t0 = time.perf_counter()
+        tpanel = tftb_panel(xseg, a.sr)  # raises TFTBError if gate G1 fails
+        timings["tftb_s"] = round(time.perf_counter() - t0, 3)
+        caveats.append(CAVEAT_TFTB)
+    elif tftb:
+        caveats.append("segment too short for the tftb panel (< 256 samples); "
+                       "tftb output is null")
     environment = {
         "backend": decomp.stats.get("method", method),
         "E": decomp.stats.get("E", E),
@@ -274,12 +285,43 @@ def analyze(path: str | Path | None = None,
         "method": method, "E": E, "eps": eps, "tau": tau, "max_imf": max_imf,
         "max_sifts": max_sifts, "seed": seed, "batch": batch,
         "nperseg": nperseg, "noverlap": noverlap, "csv": csv,
+        "wavelet": wavelet, "tftb": tftb, "entropy": entropy,
+        "fractal": fractal,
         "fmt": fmt, "dpi": dpi,
     }
     timings["total_s"] = round(time.perf_counter() - t_start, 3)
     report = build_report(meta, segment, parameters, environment,
                           decomp.n_modes, decomp.recon, rows, rrow, qinfo,
                           stats, timings, caveats)
+
+    # ---- Tier 3 report blocks (JSON-friendly, no raw arrays) ------------
+    if wlet is not None:
+        wfreqs, wC = wlet
+        report["wavelet"] = {
+            "n_scales": int(len(wfreqs)),
+            "f_lo_hz": float(wfreqs[0]),
+            "f_hi_hz": float(wfreqs[-1]),
+            "cfs_shape": list(np.asarray(wC).shape),
+            "cfs_dtype": str(np.asarray(wC).dtype),
+        }
+    if tpanel is not None:
+        report["tftb"] = {
+            "version": tpanel["version"],
+            "n_fbins": int(tpanel["n_fbins"]),
+            "time_hop": int(tpanel["time_hop"]),
+            "gate": check_tftb_gate(),
+            "panels": {
+                name: {
+                    "shape": list(np.asarray(tpanel[name]).shape),
+                    "min": float(np.min(tpanel[name])),
+                    "max": float(np.max(tpanel[name])),
+                    "f_hi_hz": float(tpanel[f"f_{tag}"][-1]),
+                }
+                for name, tag in (("spectrogram", "stft"),
+                                  ("spwvd", "spwvd"),
+                                  ("reassigned", "reass"))
+            },
+        }
 
     res = AnalysisResult(
         meta=meta, segment=segment, parameters=parameters,
@@ -288,6 +330,7 @@ def analyze(path: str | Path | None = None,
         n_modes=decomp.n_modes, mode_table=rows, recon_error=decomp.recon,
         residual_row=rrow, quantization=qinfo,
         stft=stft, hilbert=hilb,
+        wavelet=wlet, tftb_panel=tpanel,
         timings=timings, caveats=caveats,
         outdir=Path(outdir) if outdir is not None else None,
         report=report,
