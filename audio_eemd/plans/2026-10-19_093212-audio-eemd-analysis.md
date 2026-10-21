@@ -19,6 +19,18 @@
 > time axis subsampled by `time_hop`), `tftb_holder()`. `wavelet.npz` + `tftb.npz`
 > artifacts; report blocks `wavelet`/`tftb` (JSON-friendly, no raw arrays);
 > `CAVEAT_TFTB` (dev build, reference-grade, subsampled time, SPWVD Cohen-class).
+> **Tier 4 done (v0.5.0, 58/58 tests)** — `--entropy` (per-IMF sample entropy →
+> `sample_entropy` column), `--fractal` (per-IMF Higuchi dimension → `higuchi_dim`
+> column; tftb Hölder exponent → `holder_exp` replaces it when `--tftb` active),
+> `--csv` (per-IMF `imf_<k>.csv` + `residual.csv`, already wired in v0.4.0) plus
+> NEW `stft_x_coarse.csv` / `stft_imf_<k>_coarse.csv` (256 log-freq rows × ≤ 256
+> time-frame columns, median dBFS per cell, NaN → blank). Estimators run on the
+> stride-decimated ≤ 4096-pt series; `decim_rate_hz` per row + `CAVEAT_TIER4`
+> (alias-limited above half that rate: 25 s @ 48 kHz → 164 Hz; 1 s @ 44.1 kHz →
+> 4410 Hz). CLI prints `ent`/`frac` columns when present. Verified on the MLS
+> 25 s bundle (verify_t4_mls_25s): entropy 2.20 (IMF0, broadband) → 0.004 (IMF14,
+> near-pure tone); holder −0.84 → +0.74 → −0.50; coarse IMF5 table puts 82.7 % of
+> energy in 40–120 Hz around its 72.5 Hz tone.
 > **Figure redesign (user-directed, 2026-10-20):** all TFR figures now use
 > **log-frequency axes** and a **dBFS amplitude scale** (0 dBFS = full-scale sine,
 > amplitude 1.0; floor −100 dBFS): fig 03/04 via `_zxx_dBFS` (scipy
@@ -170,13 +182,31 @@ The cross-validation layer: EEMD is a time-varying, adaptive, nonlinear decompos
 2. **`--tftb`: tftb toolbox suite** (dev0 — behind gate G1, §7). One figure `fig_08_tftb.png` with up to 3 panels: `tftb.processing.reassigned.spectrogram` (tftb STFT), `smoothed_pseudo_wigner_ville` (SPWVD — Cohen-class, negative values clipped, note in caption), `reassigned_gabor` (reassignment — the "known framework" with the sharpest ridges). Plus optional numerical: `tftb.processing.analysis.holder` (Hölder-exponent estimate) per IMF when `--fractal` is also set.
    * *Why:* the user asked for "known analysis frameworks"; tftb is the standard Python TFR toolbox and is already in the venv. Dev0 → never a hard dependency: if gate G1 fails the flag errors out (exit 5) and core outputs are untouched.
 
-### Tier 4 — Numerical extras (flag-gated, optional)
+### Tier 4 — Numerical extras (flag-gated, optional) — DONE (v0.5.0)
 
-1. **`--csv`**: per-IMF CSV `imf_<k>.csv` (`time_s, value`) + `residual.csv`. ~2 MB per mode at 5 s/44.1 kHz — hence off by default.
-2. **`--entropy`**: per-IMF sample entropy (m=2, r=0.2·std(imf_k)) on a decimated series (≤ 4096 points, stride = N//4096) so cost is bounded; one column in the per-mode table.
-3. **`--fractal`**: per-IMF Higuchi fractal dimension (m = 1…10, on decimated series) — one column in the per-mode table. (tftb `holder` used instead when `--tftb` is active.)
-4. **Coarse per-IMF STFT CSV** (`--csv`): binned `freq_bin × time_bin` log-magnitude tables (≤ 256 × 256) for spreadsheet use without 2 MB files.
-* *Why:* machine-readable analysis beyond the figures, kept opt-in because each adds nontrivial compute or file bulk.
+1. **`--csv`**: per-IMF CSV `imf_<k>.csv` (`time_s, value`) + `residual.csv`
+   (DONE; was already wired in v0.4.0).
+2. **`--entropy`**: per-IMF sample entropy (m=2, r=0.2·std) — DONE:
+   `rows[k]["sample_entropy"]` (NaN → null), `res.entropy` list,
+   `timings["entropy_s"]`.
+3. **`--fractal`**: per-IMF Higuchi dimension (m = 1…10) — DONE:
+   `rows[k]["higuchi_dim"]`; when `--tftb` is active the tftb Hölder
+   exponent replaces it (`rows[k]["holder_exp"]` via `tftb_holder`), per
+   Tier 3 item 2.
+4. **Coarse per-IMF STFT CSV** (`--csv`) — DONE: `stft_x_coarse.csv` +
+   `stft_imf_<k>_coarse.csv`, 256 log-spaced frequency rows × ≤ 256 equal
+   time-frame columns, median dBFS per cell (NaN → blank), header row =
+   `freq_hz, <time-bin centers>`.
+* *Implementation notes:* both estimators run on the series stride-
+  decimated to ≤ 4096 samples (inside `spectra.sample_entropy` /
+  `higuchi_dim`); the effective rate is reported per row as
+  `decim_rate_hz` and a static caveat (CAVEAT_TIER4) states the estimate
+  is a property of the decimated series (alias-limited above half that
+  rate — e.g. a 25 s @ 48 kHz segment decimates to 1638 Hz, so every
+  high-frequency IMF is alias-limited there; a 1 s @ 44.1 kHz segment
+  decimates to 4410 Hz). CLI prints `ent`/`frac` columns when present.
+* *Why:* machine-readable analysis beyond the figures, kept opt-in because
+  each adds nontrivial compute or file bulk.
 
 ### Figure inventory (core, in production order)
 
