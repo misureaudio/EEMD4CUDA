@@ -83,10 +83,6 @@ def test_analyze_input_validation(wav2):
     with pytest.raises(EEMDError) as ei:
         analyze(x=np.ones(5), sr=100, method="cpu", E=1)
     assert ei.value.code == "eemd.bad_input"
-    with pytest.raises(NotImplementedError):
-        analyze(path=p, entropy=True)  # Tier 4
-    with pytest.raises(NotImplementedError):
-        analyze(path=p, fractal=True)  # Tier 4
 
 
 def _two_tone_array(n=2048, sr=8000):
@@ -223,6 +219,44 @@ def test_csv_flag(wav2, tmp_path):
     assert (out / "imf_0.csv").exists()
     assert (out / "residual.csv").exists()
     assert (out / f"imf_{res.n_modes - 1}.csv").exists()
+    # coarse binned STFT tables (Tier 4): header + 256 log-freq rows,
+    # 1 + min(256, n_frames) columns
+    for name in ("stft_x_coarse.csv", "stft_imf_0_coarse.csv"):
+        f = out / name
+        assert f.exists(), name
+        lines = f.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 257, name
+        T = len(res.stft[1])
+        assert len(lines[0].split(",")) == 1 + min(256, T)
+        assert lines[0].split(",")[0] == "freq_hz"
+        freqs = [float(l.split(",")[0]) for l in lines[1:]]
+        assert freqs == sorted(freqs) and freqs[0] > 0
+
+
+def test_entropy_fractal_flags(wav2, tmp_path):
+    """Tier 4: per-IMF sample entropy + Higuchi dimension (no tftb)."""
+    p, sr = wav2
+    out = tmp_path / "t4"
+    res = analyze(path=p, limits=[0, 1], unit="s", method="cpu", E=2,
+                  seed=0, entropy=True, fractal=True, outdir=out,
+                  render=False)
+    assert res.entropy is not None and len(res.entropy) == res.n_modes
+    assert res.fractal is not None and len(res.fractal) == res.n_modes
+    # 1 s @ 44.1 kHz -> stride 10 -> effective rate 4410 Hz
+    for r in res.mode_table:
+        assert "sample_entropy" in r and "higuchi_dim" in r
+        assert r["decim_rate_hz"] == pytest.approx(4410.0)
+        if r["sample_entropy"] is not None:
+            assert np.isfinite(r["sample_entropy"])
+        if r["higuchi_dim"] is not None:
+            # fractal dimension of a 1-D series: 1 (smooth) .. 2 (noise)
+            assert 0.9 <= r["higuchi_dim"] < 2.5
+    assert any("decimated" in c for c in res.caveats)
+    assert "entropy_s" in res.timings and "fractal_s" in res.timings
+    # JSON-serializable with the new columns
+    d = json.loads(json.dumps(res.to_dict()))
+    assert "sample_entropy" in d["decomposition"]["imf"][0]
+    assert "higuchi_dim" in d["decomposition"]["imf"][0]
 
 
 def test_api_import_is_light():

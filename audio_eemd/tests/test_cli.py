@@ -87,3 +87,25 @@ def test_cli_wavelet_tftb(flac_path, tmp_path):
     assert rep["wavelet"]["n_scales"] >= 10
     assert rep["tftb"]["gate"]["stft_corr"] > 0.99
     assert set(rep["tftb"]["panels"]) == {"spectrogram", "spwvd", "reassigned"}
+
+
+def test_cli_tier4(flac_path, tmp_path):
+    """--csv --entropy --fractal: CSV dumps, coarse tables, new columns."""
+    r = run_cli(flac_path, "--start", "10", "--duration", "1",
+                "--method", "cpu", "--E", "2", "--seed", "0",
+                "--csv", "--entropy", "--fractal",
+                "--out", tmp_path / "t4")
+    assert r.returncode == 0, r.stderr
+    out = tmp_path / "t4"
+    rep = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    d = rep["decomposition"]
+    assert d["imf"][0].get("sample_entropy") is not None
+    assert d["imf"][0].get("higuchi_dim") is not None
+    assert d["imf"][0].get("decim_rate_hz") == 4410.0
+    assert (out / "imf_0.csv").exists()
+    assert (out / "residual.csv").exists()
+    assert (out / "stft_x_coarse.csv").exists()
+    assert (out / "stft_imf_0_coarse.csv").exists()
+    # stdout mode table shows the new columns (header line)
+    hdr_line = next(l for l in r.stdout.splitlines() if l.startswith("mode"))
+    assert "ent" in hdr_line and "frac" in hdr_line
