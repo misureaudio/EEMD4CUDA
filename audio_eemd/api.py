@@ -16,7 +16,9 @@ Tier 1: load → segment → EEMD → per-mode table → artifacts.
 Tier 2: STFT + per-IMF Hilbert IF (always, when the segment is long enough).
 Tier 3: `wavelet=True` → Morlet CWT scalogram; `tftb=True` → gated tftb
     panel (TFTBError with exit-code-5 semantics if gate G1 fails).
-Tier 4: entropy/fractal — still NotImplementedError.
+Tier 4: `entropy=True` → per-IMF sample entropy; `fractal=True` → per-IMF
+    Higuchi fractal dimension (or the tftb Hölder exponent when tftb=True);
+    `csv=True` → per-IMF CSV dumps + coarse binned STFT tables.
 """
 from __future__ import annotations
 
@@ -30,9 +32,11 @@ from .audio_io import (AudioError, AudioFile, SegmentError, audio_stats,
                        bit_depth, load_audio, resolve_segment, select_segment)
 from .eemd_stage import EEMDError, run_eemd
 from .report import (CAVEAT_GPU, CAVEAT_HILBERT, CAVEAT_NONORTHOGONAL,
-                     CAVEAT_SEED, CAVEAT_TFTB, build_report, mode_table)
-from .spectra import (TFTBError, check_tftb_gate, hilbert_if, if_stats,
-                      morlet_cwt, stft_block, tftb_panel)
+                     CAVEAT_SEED, CAVEAT_TFTB, CAVEAT_TIER4, build_report,
+                     mode_table)
+from .spectra import (TFTBError, check_tftb_gate, higuchi_dim, hilbert_if,
+                      if_stats, morlet_cwt, sample_entropy, stft_block,
+                      tftb_holder, tftb_panel)
 
 __all__ = [
     "analyze", "AnalysisResult", "TFTBError",
@@ -152,8 +156,6 @@ def analyze(path: str | Path | None = None,
     """
     if (path is None) == (x is None):
         raise ValueError("analyze: provide exactly one of path= or x= (with sr=)")
-    if entropy or fractal:
-        raise NotImplementedError("entropy/fractal are Tier-4 features")
 
     # ---- load / segment ------------------------------------------------
     timings: dict = {}
@@ -259,6 +261,41 @@ def analyze(path: str | Path | None = None,
     elif tftb:
         caveats.append("segment too short for the tftb panel (< 256 samples); "
                        "tftb output is null")
+    # ---- Tier 4: per-IMF entropy / fractal (flag-gated) -----------------
+    # Both estimators run on each IMF stride-decimated to <= 4096 samples
+    # (inside spectra.sample_entropy / higuchi_dim); the effective rate is
+    # reported per row so alias-limited estimates are identifiable.
+    ent_vals = None
+    if entropy:
+        t0 = time.perf_counter()
+        stride = max(1, len(xseg) // 4096)
+        rate = float(a.sr / stride)
+        ent_vals = [sample_entropy(m) for m in decomp.imfs]
+        for k, v in enumerate(ent_vals):
+            rows[k]["sample_entropy"] = float(v) if np.isfinite(v) else None
+            rows[k]["decim_rate_hz"] = rate
+        timings["entropy_s"] = round(time.perf_counter() - t0, 3)
+
+    frac_vals = None
+    if fractal:
+        t0 = time.perf_counter()
+        stride = max(1, len(xseg) // 4096)
+        rate = float(a.sr / stride)
+        if tpanel is not None:
+            # tftb active: the tftb Hölder exponent replaces Higuchi
+            # (plan Tier 3 item 2 / Tier 4 item 3)
+            frac_vals = [tftb_holder(m, a.sr) for m in decomp.imfs]
+            for k, v in enumerate(frac_vals):
+                rows[k]["holder_exp"] = v
+        else:
+            frac_vals = [higuchi_dim(m) for m in decomp.imfs]
+            for k, v in enumerate(frac_vals):
+                rows[k]["higuchi_dim"] = float(v) if np.isfinite(v) else None
+                rows[k]["decim_rate_hz"] = rate
+        timings["fractal_s"] = round(time.perf_counter() - t0, 3)
+
+    if entropy or fractal:
+        caveats.append(CAVEAT_TIER4)
     environment = {
         "backend": decomp.stats.get("method", method),
         "E": decomp.stats.get("E", E),
@@ -331,6 +368,7 @@ def analyze(path: str | Path | None = None,
         residual_row=rrow, quantization=qinfo,
         stft=stft, hilbert=hilb,
         wavelet=wlet, tftb_panel=tpanel,
+        entropy=ent_vals, fractal=frac_vals,
         timings=timings, caveats=caveats,
         outdir=Path(outdir) if outdir is not None else None,
         report=report,

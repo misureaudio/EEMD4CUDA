@@ -44,6 +44,12 @@ CAVEAT_TFTB = (
     "panel is a Cohen-class TFR with negative values (clipped in the "
     "figure)."
 )
+CAVEAT_TIER4 = (
+    "sample entropy / fractal estimates are computed on each IMF stride-"
+    "decimated to <= 4096 samples (per-mode table column "
+    "'decim_rate_hz' = effective rate); content above half that rate is "
+    "aliased, so read the estimate as a property of the decimated series."
+)
 
 
 def _dominant_freq(x: np.ndarray, sr: int) -> float | None:
@@ -249,13 +255,82 @@ def write_mode_csvs(outdir: Path, t: np.ndarray, imfs: np.ndarray,
     return paths
 
 
+def _coarse_stft_table(dB: np.ndarray, f: np.ndarray, t: np.ndarray,
+                       n_fb: int = 256, n_tb: int = 256) -> np.ndarray:
+    """Median dBFS per (log-freq bin, time bin): [n_fb, n_tb_eff].
+
+    Time bins are equal-width in frame index (<= n_tb); frequency bins are
+    log-spaced from the first non-DC bin to the top of the axis. Cells with
+    no contributing STFT bin are NaN.
+    """
+    T = dB.shape[1]
+    n_tb_eff = min(n_tb, T)
+    tb_len = max(1, T // n_tb_eff)
+    trim = tb_len * n_tb_eff
+    f_pos = f[f > 0]
+    f_lo = float(f_pos[0]) if f_pos.size else float(f[0])
+    f_hi = float(f[-1])
+    edges = np.geomspace(f_lo, f_hi, n_fb + 1)
+    fb_idx = np.clip(np.searchsorted(edges, f, side="right") - 1, 0, n_fb - 1)
+    table = np.full((n_fb, n_tb_eff), np.nan)
+    for i in range(n_fb):
+        rows = (fb_idx == i)
+        if not rows.any():
+            continue
+        d = dB[rows][:, :trim].reshape(-1, n_tb_eff, tb_len)
+        table[i] = np.nanmedian(d, axis=(0, 2))
+    return table
+
+
+def _write_coarse_csv(p: Path, table: np.ndarray, f: np.ndarray,
+                      t: np.ndarray, n_tb_eff: int, tb_len: int) -> None:
+    """Spreadsheet table: rows = log-freq bins, cols = time bins (centers)."""
+    n_fb = table.shape[0]
+    f_pos = f[f > 0]
+    f_lo = float(f_pos[0]) if f_pos.size else float(f[0])
+    f_hi = float(f[-1])
+    centers = (np.geomspace(f_lo, f_hi, n_fb + 1)[:-1]
+               * np.geomspace(f_lo, f_hi, n_fb + 1)[1:]) ** 0.5
+    if len(t) > 1:
+        time_centers = (np.arange(n_tb_eff) + 0.5) * tb_len * (t[1] - t[0])
+    else:
+        time_centers = np.zeros(n_tb_eff)
+    lines = [",".join(["freq_hz"] + [f"{c:.6f}" for c in time_centers])]
+    for i in range(n_fb):
+        vals = ",".join("" if np.isnan(v) else f"{v:.2f}" for v in table[i])
+        lines.append(f"{centers[i]:.2f},{vals}")
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_coarse_stft_csvs(outdir: Path, stft: tuple) -> list[Path]:
+    """Coarse binned STFT tables (Tier 4 --csv): <= 256 x 256 median-dBFS
+    grids of the original signal and every IMF, for spreadsheet use without
+    the full-rate per-IMF CSVs."""
+    f, t, Zxx_orig, Zxx_imf = stft
+    paths = []
+    T = Zxx_orig.shape[1]
+    n_tb_eff = min(256, T)
+    tb_len = max(1, T // n_tb_eff)
+    dB_orig = 20 * np.log10(2 * np.abs(Zxx_orig) + 1e-12)
+    p = outdir / "stft_x_coarse.csv"
+    _write_coarse_csv(p, _coarse_stft_table(dB_orig, f, t), f, t, n_tb_eff, tb_len)
+    paths.append(p)
+    for k in range(Zxx_imf.shape[0]):
+        dB_k = 20 * np.log10(2 * np.abs(Zxx_imf[k]) + 1e-12)
+        p = outdir / f"stft_imf_{k}_coarse.csv"
+        _write_coarse_csv(p, _coarse_stft_table(dB_k, f, t), f, t, n_tb_eff,
+                          tb_len)
+        paths.append(p)
+    return paths
+
+
 def write_artifacts(res, outdir: str | Path) -> list[Path]:
     """Write all Tier-1/2/3 artifacts for an AnalysisResult (duck-typed).
 
     Files: report.json, metadata.csv, imfs.npz, stft.npz, hilbert.npz,
     wavelet.npz / tftb.npz (when computed) and (if parameters['csv'])
-    per-IMF CSVs. Figures are written by the caller
-    (plots.render_figures).
+    per-IMF CSVs + coarse binned STFT CSVs. Figures are written by the
+    caller (plots.render_figures).
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -272,4 +347,6 @@ def write_artifacts(res, outdir: str | Path) -> list[Path]:
         files.append(write_tftb_npz(outdir, res.tftb_panel))
     if res.parameters.get("csv"):
         files += write_mode_csvs(outdir, res.t, res.imfs, res.residual)
+        if res.stft is not None:
+            files += write_coarse_stft_csvs(outdir, res.stft)
     return files

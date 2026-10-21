@@ -7,7 +7,9 @@ tftb panel (fig 08, gate G1); writes report.json, metadata.csv, imfs.npz,
 stft.npz, hilbert.npz and figures fig_01..06 (+07/08 when flagged).
 Flags: --method auto|cpu|gpu, --E, --eps, --tau, --max-imf, --max-sifts,
        --seed, --batch, --nperseg, --noverlap, --wavelet, --tftb,
-       --csv (per-IMF CSV dumps).
+       --csv (per-IMF CSV dumps + coarse STFT tables),
+       --entropy (per-IMF sample entropy), --fractal (per-IMF Higuchi
+       dimension; tftb Hölder exponent when --tftb is also set).
 
 Exit codes: 0 ok · 2 bad usage/segment · 3 file unreadable · 4 EEMD error
             · 5 tftb gate G1 failed (only with --tftb).
@@ -87,7 +89,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="also compute the tftb panel (fig_08_tftb); "
                          "requires gate G1 to pass (exit 5 if not)")
     ap.add_argument("--csv", action="store_true",
-                    help="also dump per-IMF CSVs (imf_k.csv, residual.csv)")
+                    help="also dump per-IMF CSVs (imf_k.csv, residual.csv) "
+                         "and coarse binned STFT tables (stft_*_coarse.csv)")
+    ap.add_argument("--entropy", action="store_true",
+                    help="per-IMF sample entropy column (Tier 4)")
+    ap.add_argument("--fractal", action="store_true",
+                    help="per-IMF fractal column (Tier 4): Higuchi dimension, "
+                         "or the tftb Hölder exponent when --tftb is set")
     ap.add_argument("--out", type=Path, default=None,
                     help="output dir (default ./eemd_out/<stem>_<a>-<b>s/)")
     args = ap.parse_args(argv)
@@ -107,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
                       max_sifts=args.max_sifts, seed=args.seed,
                       batch=args.batch, nperseg=args.nperseg,
                       noverlap=args.noverlap, wavelet=args.wavelet,
-                      tftb=args.tftb, csv=args.csv,
+                      tftb=args.tftb, csv=args.csv, entropy=args.entropy,
+                      fractal=args.fractal,
                       outdir=None, render=False)
     except AudioError as e:
         print(f"error[{e.code}]: {e}", file=sys.stderr)
@@ -149,16 +158,28 @@ def main(argv: list[str] | None = None) -> int:
           f"wall {env['wall_s']:.1f} s")
     print(f"n_modes:  {d['n_modes']} | recon_error: {d['recon_error']:.3e} | "
           f"energy_sum: {d['energy_sum']:.6f}")
+    has_ent = any("sample_entropy" in r for r in d["imf"])
+    has_frac = any(("higuchi_dim" in r) or ("holder_exp" in r)
+                   for r in d["imf"])
+    hdr_extra = (f"{'ent':>8}" if has_ent else "") + \
+                (f"{'frac':>8}" if has_frac else "")
     print(f"{'mode':>4} {'std':>12} {'energy%':>9} {'dom Hz':>10} {'IF Hz':>10} "
-          f"{'zcross':>8}  flags")
+          f"{'zcross':>8}" + hdr_extra + "  flags")
     for r in d["imf"]:
         flag = "Q" if r["quantization_level"] else ""
         df = ("n/a" if r["dominant_freq_hz"] is None
               else f"{r['dominant_freq_hz']:.1f}")
         ifm = ("n/a" if r.get("if_median_hz") is None
                else f"{r['if_median_hz']:.1f}")
+        extra = ""
+        if has_ent:
+            v = r.get("sample_entropy")
+            extra += " {:>8}".format("n/a" if v is None else f"{v:.3f}")
+        if has_frac:
+            v = r.get("higuchi_dim", r.get("holder_exp"))
+            extra += " {:>8}".format("n/a" if v is None else f"{v:.3f}")
         print(f"{r['k']:>4} {r['std']:>12.6g} {100 * r['energy_frac']:>9.4f} "
-              f"{df:>10} {ifm:>10} {r['n_zerocross']:>8}  {flag}")
+              f"{df:>10} {ifm:>10} {r['n_zerocross']:>8}{extra}  {flag}")
     rr = d["residual"]
     df = ("n/a" if rr["dominant_freq_hz"] is None
           else f"{rr['dominant_freq_hz']:.1f}")
