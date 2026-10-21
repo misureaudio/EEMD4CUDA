@@ -208,6 +208,43 @@ The cross-validation layer: EEMD is a time-varying, adaptive, nonlinear decompos
 * *Why:* machine-readable analysis beyond the figures, kept opt-in because
   each adds nontrivial compute or file bulk.
 
+### Research note — Farina MLS-ESS moving notch (RESOLVED, 2026-10-21)
+
+Not in the package (signal-specific analysis). Scripts:
+`mls-ess-main/notch_stepA.py` (measure generator files), `notch_stepB.py`
+(predict + detect), `notch_stepC.py` (figure). Data/figures:
+`eemd_out/notch_mls/` (`notch_profile.npz`, `notch_trajectory.png`,
+`notch_zoom_25s.png`).
+
+* **Chirp law (measured-verified):** yESS (1,310,710 smp = 10 MLS periods,
+  27.306 s) is a clean exponential chirp f(s) = 23.4375·1024^(s/n) Hz —
+  23.4 Hz → 24.0 kHz, no aliasing ("low to high" as the user stated).
+* **Geometry:** yMLSfin = 41 *identical* MLS blocks (verified: max
+  inter-block difference = 0), central block #20 zeroed (gap [54.61, 57.34] s
+  input time). The gap sits in the 27.3 s kernel window over notails output
+  time [27.31, 57.34] s (30.04 s), fully developed [30.04, 54.61] s (24.58 s)
+  = exactly the user's "25 s around the center" (center 42.3 s).
+* **Predicted trajectory:** notch band at time t = [f(s_lo(t)), f(s_hi(t))]
+  with the gap window s ∈ [t·sr + ltail − 21P, t·sr + ltail − 20P] clipped to
+  the kernel — always exactly **one octave wide** (gap = 10% of kernel, chirp
+  spans 2^10), sweeping 23 Hz → 24 kHz.
+* **Detection (STFT 4096/2048, 11.7 Hz bins):** dip of **+30.5 dB mean /
+  +35.5 dB median** (band median vs out-of-band median) along the predicted
+  band; control fixed bands outside the window: −1.4 ± 6.8 dB (bias from the
+  1/f tilt). Measured dip centroid at 1.14× the band geometric center (IQR
+  1.07–1.20) — inside the band.
+* **Mechanism:** the 41 identical blocks make the train P-periodic
+  (P = 2.731 s, f0 = 0.366 Hz — a comb 32× finer than the STFT bins,
+  appearing as the smooth 1/f envelope). Full-train output = stationary
+  harmonic comb, line amplitude M(n)·H(n·f0), H = DFT of the ESS kernel.
+  H(f) is stationary-phase-concentrated at the kernel position s*(f) where
+  the chirp frequency equals f (a few samples wide). The zeroed block removes
+  kernel interval [t−g1, t−g0] from H; when it covers s*(f), the whole
+  stationary-phase contribution is removed → comb lines in the band collapse
+  → the 30 dB notch. (The naive "1 of 10 blocks = 10% power = 0.5 dB" model
+  is wrong: the cancellation is coherent, in the kernel DFT, not a random
+  10% subtraction.)
+
 ### Figure inventory (core, in production order)
 
 | File | Content |
